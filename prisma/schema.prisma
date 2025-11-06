@@ -1,0 +1,551 @@
+// SMS CloudMX Platform - Multi-tenant SaaS for SMS Marketing Campaigns
+
+generator client {
+    provider = "prisma-client-js"
+    binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
+    output = "/home/ubuntu/sms_cloudmx_site/app/node_modules/.prisma/client"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+// Company/Tenant model - Each company is isolated
+model Company {
+  id          String   @id @default(cuid())
+  name        String
+  email       String   @unique
+  phone       String?
+  website     String?
+  logoUrl     String?  // S3 URL for company logo
+  address     String?
+  city        String?
+  state       String?
+  country     String?
+  zipCode     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Credit system
+  credits     Int      @default(0)
+  
+  // Relations
+  users       User[]
+  contactLists ContactList[]
+  campaigns   Campaign[]
+  transactions CreditTransaction[]
+  templates   MessageTemplate[]
+  labMobileConfig LabMobileConfig?
+  
+  @@map("companies")
+}
+
+// User roles enum
+enum UserRole {
+  SUPER_ADMIN
+  COMPANY_ADMIN
+  USER
+}
+
+// User model with company association
+model User {
+  id          String    @id @default(cuid())
+  email       String    @unique
+  password    String
+  firstName   String
+  lastName    String
+  jobTitle    String?
+  role        UserRole  @default(USER)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  lastLoginAt DateTime?
+  
+  // Company association (optional for super admins)
+  companyId   String?
+  company     Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  createdCampaigns Campaign[] @relation("CampaignCreatedBy")
+  createdContactLists ContactList[] @relation("ContactListCreatedBy")
+  createdTemplates MessageTemplate[] @relation("TemplateCreatedBy")
+  accounts Account[]
+  sessions Session[]
+  
+  @@map("users")
+}
+
+// List types and subscription status enums
+enum ListType {
+  STATIC      // Manually created list
+  DYNAMIC     // Auto-updating list based on criteria  
+  IMPORTED    // Imported from file
+  SEGMENT     // Segmented from other lists
+}
+
+enum SubscriptionStatus {
+  SUBSCRIBED
+  UNSUBSCRIBED
+  PENDING
+  BOUNCED
+  COMPLAINED
+}
+
+// Contact List model with advanced features
+model ContactList {
+  id            String    @id @default(cuid())
+  name          String
+  description   String?
+  type          ListType  @default(STATIC)
+  
+  // File import details
+  fileName      String?   // Original uploaded file name
+  fileUrl       String?   // S3 URL for uploaded file
+  
+  // Statistics
+  totalContacts    Int       @default(0)
+  validContacts    Int       @default(0)
+  subscribedCount  Int       @default(0)
+  unsubscribedCount Int      @default(0)
+  
+  // Dynamic list criteria (JSON object for flexible criteria)
+  segmentCriteria  Json?     // For dynamic lists and segments
+  
+  // List settings
+  isActive         Boolean   @default(true)
+  allowAutoUpdate  Boolean   @default(false) // For dynamic lists
+  lastSyncAt       DateTime?
+  
+  // Metadata
+  tags             String[]  @default([])
+  color            String?   // For UI categorization
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Company association
+  companyId     String
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Created by
+  createdById   String
+  createdBy     User      @relation("ContactListCreatedBy", fields: [createdById], references: [id])
+  
+  // Relations
+  contacts      Contact[]
+  campaigns     Campaign[]
+  subscriptions ContactSubscription[]
+  
+  @@map("contact_lists")
+}
+
+// Individual contact model with enhanced features
+model Contact {
+  id          String  @id @default(cuid())
+  phone       String  // Primary phone number (required)
+  firstName   String?
+  lastName    String?
+  email       String?
+  company     String?
+  jobTitle    String?
+  
+  // Geographic data for segmentation
+  city        String?
+  state       String?
+  country     String @default("México")
+  zipCode     String?
+  
+  // Demographic data
+  birthDate   DateTime? @db.Date
+  gender      String?
+  
+  // Engagement tracking
+  lastMessageAt    DateTime?
+  lastOpenedAt     DateTime?
+  messageCount     Int @default(0)
+  campaignCount    Int @default(0)
+  
+  // Segmentation fields
+  tags             String[] @default([])
+  customFields     Json?    // Store additional custom fields from CSV
+  
+  // Status
+  isValid          Boolean @default(true)
+  isActive         Boolean @default(true)
+  
+  // Lead scoring (0-100)
+  score            Int @default(0)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Contact List association
+  contactListId String
+  contactList   ContactList @relation(fields: [contactListId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  messages      Message[]
+  subscriptions ContactSubscription[]
+  activities    ContactActivity[]
+  
+  @@unique([phone, contactListId]) // Prevent duplicate phones in same list
+  @@map("contacts")
+}
+
+// Contact subscription management model
+model ContactSubscription {
+  id            String             @id @default(cuid())
+  status        SubscriptionStatus @default(SUBSCRIBED)
+  subscribedAt  DateTime?
+  unsubscribedAt DateTime?
+  reason        String?            // Reason for unsubscription
+  source        String?            // How they subscribed/unsubscribed
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Contact association
+  contactId     String
+  contact       Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  
+  // List association
+  contactListId String
+  contactList   ContactList @relation(fields: [contactListId], references: [id], onDelete: Cascade)
+  
+  @@unique([contactId, contactListId])
+  @@map("contact_subscriptions")
+}
+
+// Contact activity tracking for better segmentation
+enum ActivityType {
+  MESSAGE_SENT
+  MESSAGE_DELIVERED
+  MESSAGE_OPENED
+  MESSAGE_CLICKED
+  SUBSCRIBED
+  UNSUBSCRIBED
+  IMPORTED
+  UPDATED
+  CAMPAIGN_ADDED
+  LIST_ADDED
+}
+
+model ContactActivity {
+  id            String       @id @default(cuid())
+  type          ActivityType
+  description   String?
+  metadata      Json?        // Additional activity data
+  
+  createdAt     DateTime @default(now())
+  
+  // Contact association
+  contactId     String
+  contact       Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  
+  // Optional campaign association
+  campaignId    String?
+  
+  @@map("contact_activities")
+}
+
+// Campaign enums
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  COMPLETED
+  FAILED
+  PAUSED
+  CANCELED
+}
+
+enum CampaignType {
+  IMMEDIATE
+  SCHEDULED
+}
+
+enum TargetType {
+  LIST
+  ALL_CONTACTS
+}
+
+// Message Template model
+model MessageTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  content     String   @db.Text
+  variables   String[] @default([]) // e.g., ["firstName", "company"]
+  category    String   @default("general")
+  isActive    Boolean  @default(true)
+  
+  // Company association
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Created by
+  createdById String
+  createdBy   User     @relation("TemplateCreatedBy", fields: [createdById], references: [id])
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  campaigns Campaign[]
+
+  @@map("message_templates")
+}
+
+// Enhanced Campaign model
+model Campaign {
+  id            String         @id @default(cuid())
+  name          String
+  message       String         @db.Text // SMS message template with variables
+  status        CampaignStatus @default(DRAFT)
+  type          CampaignType   @default(IMMEDIATE)
+  targetType    TargetType     @default(LIST)
+  
+  // Scheduling
+  scheduledAt   DateTime?
+  timezone      String         @default("America/Mexico_City")
+  startedAt     DateTime?
+  completedAt   DateTime?
+  canceledAt    DateTime?
+  
+  // Statistics
+  totalRecipients Int @default(0)
+  sentCount       Int @default(0)
+  deliveredCount  Int @default(0)
+  failedCount     Int @default(0)
+  creditsUsed     Int @default(0)
+  
+  // Cost tracking
+  estimatedCost   Float @default(0)
+  actualCost      Float @default(0)
+  
+  // Template association
+  templateId      String?
+  template        MessageTemplate? @relation(fields: [templateId], references: [id])
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Company association
+  companyId     String
+  company       Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  // Contact List association (nullable for "ALL_CONTACTS" campaigns)
+  contactListId String?
+  contactList   ContactList? @relation(fields: [contactListId], references: [id])
+  
+  // Created by
+  createdById   String
+  createdBy     User @relation("CampaignCreatedBy", fields: [createdById], references: [id])
+  
+  // Relations
+  messages      Message[]
+  stats         CampaignStats[]
+  
+  @@map("campaigns")
+}
+
+// Campaign statistics for detailed analytics
+model CampaignStats {
+  id                String   @id @default(cuid())
+  campaignId        String
+  campaign          Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  
+  // Time-based metrics (hourly breakdown)
+  hour              Int      // 0-23
+  date              DateTime @db.Date
+  
+  // Hourly metrics
+  messagesSent      Int      @default(0)
+  messagesDelivered Int      @default(0)
+  messagesFailed    Int      @default(0)
+  creditsUsed       Int      @default(0)
+  cost              Float    @default(0)
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([campaignId, date, hour])
+  @@map("campaign_stats")
+}
+
+// Message status enum
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  FAILED
+}
+
+// Individual message model (for tracking each SMS)
+model Message {
+  id          String        @id @default(cuid())
+  phone       String
+  message     String        // Final message with variables replaced
+  status      MessageStatus @default(PENDING)
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  failReason  String?
+  creditsUsed Int           @default(1)
+  
+  // LabMobile tracking fields
+  labMobileSubId   String?     // ID de subpetición de LabMobile
+  labMobileStatus  String?     // Estado original de LabMobile
+  labMobileCode    String?     // Código de respuesta de LabMobile
+  labMobileAcklevel String?    // Nivel de confirmación (operator/handset/error)
+  deliveryStatus   String?     // Estado de entrega detallado
+  deliveryTime     DateTime?   // Tiempo real de entrega
+  smsParts         Int         @default(1)  // Número de partes SMS
+  encodingType     String      @default("GSM7")  // Tipo de codificación
+  
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  
+  // Campaign association
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  
+  // Contact association (optional)
+  contactId   String?
+  contact     Contact? @relation(fields: [contactId], references: [id])
+  
+  @@index([labMobileSubId])
+  @@index([status])
+  @@index([campaignId, status])
+  @@map("messages")
+}
+
+// Credit transaction types
+enum TransactionType {
+  PURCHASE
+  USAGE
+  REFUND
+  ADJUSTMENT
+}
+
+// Credit transaction model
+model CreditTransaction {
+  id          String          @id @default(cuid())
+  type        TransactionType
+  amount      Int             // Positive for additions, negative for usage
+  balance     Int             // Balance after transaction
+  description String
+  reference   String?         // Campaign ID for usage, order ID for purchase, etc.
+  createdAt   DateTime        @default(now())
+  
+  // Company association
+  companyId   String
+  company     Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  @@map("credit_transactions")
+}
+
+// System configuration model (for super admin)
+model SystemConfig {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       String
+  description String?
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  
+  @@map("system_config")
+}
+
+// Super Admin activity log
+model AdminLog {
+  id          String   @id @default(cuid())
+  action      String   // CREATE_COMPANY, UPDATE_PRICING, etc.
+  entity      String?  // Company ID, Config key, etc.
+  description String
+  metadata    Json?    // Additional data about the action
+  createdAt   DateTime @default(now())
+  
+  // Admin who performed the action
+  adminId     String?
+  adminEmail  String?
+  
+  @@map("admin_logs")
+}
+
+// NextAuth.js required models
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// LabMobile configuration per company
+model LabMobileConfig {
+  id          String   @id @default(cuid())
+  companyId   String   @unique
+  username    String   // Email de registro en LabMobile
+  apiToken    String   // Token de API de LabMobile
+  tpoa        String?  // Remitente por defecto
+  isActive    Boolean  @default(true)
+  webhookUrl  String?  // URL del webhook para confirmaciones
+  testMode    Boolean  @default(false)  // Modo de prueba
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  @@map("labmobile_config")
+}
+
+// LabMobile webhook logs for debugging
+model LabMobileWebhookLog {
+  id          String   @id @default(cuid())
+  webhookType String   // delivery, click, inbound
+  subId       String
+  msisdn      String?
+  acklevel    String?
+  status      String?
+  description String?
+  timestamp   DateTime?
+  rawPayload  Json     // Payload completo del webhook
+  processed   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  
+  @@index([subId])
+  @@index([processed])
+  @@map("labmobile_webhook_logs")
+}
